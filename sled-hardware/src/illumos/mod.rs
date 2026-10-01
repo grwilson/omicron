@@ -21,6 +21,7 @@ use slog::error;
 use slog::info;
 use slog::o;
 use slog::warn;
+use slog_error_chain::InlineErrorChain;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::watch;
 use uuid::Uuid;
@@ -191,17 +192,24 @@ impl HardwareView {
     // correct values by calling `poll_device_tree()` _before_ it ever exposes a
     // `HardwareView` to its consumers. This isn't ideal (we leave a window open
     // where we return a mostly-empty view) but is not trivial to rework.
+    //
+    // `rawmem_bytes` is memory the kernel withheld from `page_t` management at
+    // boot for the VMM reservoir. sysconf's physical page count includes it,
+    // but those pages have no `page_t`, so they are subtracted from
+    // `usable_physical_pages`, which is used to estimate `page_t` overhead.
     fn new(
         baseboard: Baseboard,
         tofino: TofinoView,
         cpu_family: SledCpuFamily,
+        rawmem_bytes: u64,
     ) -> Result<Self, Error> {
         Ok(Self {
             tofino,
             disks: HashMap::new(),
             baseboard,
             online_processor_count: sysconf::online_processor_count()?,
-            usable_physical_pages: sysconf::usable_physical_pages()?,
+            usable_physical_pages: sysconf::usable_physical_pages()?
+                .saturating_sub(rawmem_bytes / sysconf::page_size()?),
             usable_physical_ram_bytes: sysconf::usable_physical_ram_bytes()?,
             cpu_family,
         })
@@ -805,6 +813,22 @@ impl HardwareManager {
             format!("Failed to learn baseboard via device tree: {err}")
         })?;
 
+        let rawmem_bytes =
+            match illumos_utils::vmm_reservoir::rawmem_total_bytes() {
+                Ok(bytes) => {
+                    info!(log, "Learned rawmem size"; "rawmem_bytes" => bytes);
+                    bytes
+                }
+                Err(err) => {
+                    warn!(
+                        log,
+                        "Failed to learn rawmem size, assuming none";
+                        InlineErrorChain::new(&err),
+                    );
+                    0
+                }
+            };
+
         let hw =
             match sled_mode {
                 // Treat as a possible scrimlet and setup to scan for real Tofino device.
@@ -814,6 +838,7 @@ impl HardwareManager {
                         baseboard,
                         TofinoView::Real(TofinoSnapshot::new()),
                         cpu_family,
+                        rawmem_bytes,
                     )
                 }
 
@@ -822,6 +847,7 @@ impl HardwareManager {
                     baseboard,
                     TofinoView::Stub { active: false },
                     cpu_family,
+                    rawmem_bytes,
                 ),
 
                 // Treat as scrimlet and use the stub Tofino device.
@@ -830,6 +856,7 @@ impl HardwareManager {
                         baseboard,
                         TofinoView::Stub { active: true },
                         cpu_family,
+                        rawmem_bytes,
                     )
                 }
 
@@ -846,6 +873,7 @@ impl HardwareManager {
                     baseboard,
                     TofinoView::Stub { active: true },
                     cpu_family,
+                    rawmem_bytes,
                 ),
             }
             .map_err(|e| e.to_string())?;

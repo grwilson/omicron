@@ -33,11 +33,17 @@ pub fn usable_physical_pages() -> Result<u64, Error> {
     Ok(pages)
 }
 
-/// Returns the amount of RAM on this sled, in bytes.
-pub fn usable_physical_ram_bytes() -> Result<u64, Error> {
-    let page_size: u64 = illumos_utils::libc::sysconf(libc::_SC_PAGESIZE)
+/// Returns the size of a `_SC_PHYS_PAGES` page, in bytes.
+pub fn page_size() -> Result<u64, Error> {
+    let page_size = illumos_utils::libc::sysconf(libc::_SC_PAGESIZE)
         .map_err(|e| Error::Sysconf { arg: "physical page size", e })?
         .try_into()?;
+    Ok(page_size)
+}
+
+/// Returns the amount of RAM on this sled, in bytes.
+pub fn usable_physical_ram_bytes() -> Result<u64, Error> {
+    let page_size = page_size()?;
 
     // Note that `_SC_PHYS_PAGES` counts, specifically, the number of
     // `_SC_PAGESIZE` pages of physical memory. This means the multiplication

@@ -33,6 +33,9 @@ pub enum Error {
     #[error("Failed to open vmm ctl fd")]
     VmCtlOpen(#[source] std::io::Error),
 
+    #[error("Failed to query reservoir")]
+    ReservoirQuery(#[source] std::io::Error),
+
     #[error("Failed to resize reservoir")]
     ReservoirError {
         #[source]
@@ -68,6 +71,48 @@ impl ReservoirControl {
         })?;
 
         Ok(())
+    }
+}
+
+// `VMM_RESV_QUERY2` and `struct vmm_resv_query2`, from illumos
+// `sys/vmm_dev.h`.
+//
+// TODO: Replace these with the definitions from `bhyve_api` once propolis
+// exposes them.
+const VMM_RESV_QUERY2: i32 =
+    ((b'V' as i32) << 16) | ((b'M' as i32) << 8) | 0x12;
+
+#[repr(C)]
+#[derive(Default)]
+// Only `vrq_rawmem_total_sz` is read here, but the layout must match the
+// kernel's struct exactly since the kernel copies out the whole thing.
+#[allow(dead_code)]
+struct VmmResvQuery2 {
+    vrq_free_sz: usize,
+    vrq_alloc_sz: usize,
+    vrq_alloc_transient_sz: usize,
+    vrq_limit: usize,
+    vrq_rawmem_total_sz: usize,
+    vrq_rawmem_free_sz: usize,
+}
+
+/// Returns the total size, in bytes, of the kernel's rawmem pool.
+///
+/// rawmem is physical memory the kernel withholds from `page_t` management at
+/// boot for the VMM reservoir to draw from. Because it has no `page_t`s, it is
+/// not counted by `sysconf(_SC_PHYS_PAGES)`. Returns 0 on kernels without
+/// rawmem support.
+pub fn rawmem_total_bytes() -> Result<u64, Error> {
+    let ctl = bhyve_api::VmmCtlFd::open().map_err(|e| Error::VmCtlOpen(e))?;
+    let mut query = VmmResvQuery2::default();
+
+    // Safety: `VmmResvQuery2` matches the kernel's `struct vmm_resv_query2`,
+    // which is all that VMM_RESV_QUERY2 copies out.
+    match unsafe { ctl.ioctl(VMM_RESV_QUERY2, &mut query) } {
+        Ok(_) => Ok(query.vrq_rawmem_total_sz as u64),
+        // Kernels which predate rawmem don't recognize this ioctl.
+        Err(e) if e.raw_os_error() == Some(libc::ENOTTY) => Ok(0),
+        Err(e) => Err(Error::ReservoirQuery(e)),
     }
 }
 

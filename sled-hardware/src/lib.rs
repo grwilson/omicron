@@ -144,6 +144,10 @@ impl MemoryReservations {
         // other hand, the last time page_t changed was illumos-gate commit
         // a5652762e5 from 2006.
         const PAGE_T_SIZE: u64 = 120;
+        // `usable_physical_pages` excludes the kernel's rawmem pool (which has
+        // no `page_t`s), while `hardware_physical_ram_bytes` includes it, so
+        // rawmem counts toward VMM-eligible memory without any `page_t`
+        // overhead. This matches how the kernel sizes rawmem at boot.
         let max_page_t_bytes =
             self.hardware_manager.usable_physical_pages() * PAGE_T_SIZE;
 
